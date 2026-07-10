@@ -1,13 +1,15 @@
-# MoveIt Task Constructor (MTC) & Warehouse_ROS_Mongo Installation Guide – ROS 2 Jazzy
+# MoveIt Task Constructor (MTC) & Warehouse_ROS_Mongo Installation Guide – ROS 2 Humble & Jazzy
 
-This guide walks you through installing the MoveIt Task Constructor (MTC) and `warehouse_ros_mongo` packages and applying necessary fixes for a successful setup on ROS 2 Jazzy.
+This guide walks you through installing the MoveIt Task Constructor (MTC) and `warehouse_ros_mongo` packages and applying necessary fixes for a successful setup on ROS 2 Humble or Jazzy.
+
+> **Note:** If you are using this repo's bundled `src/moveit_task_constructor/` source, it already has all patches applied and works for both Humble and Jazzy — you can skip the clone/patch steps below and go straight to `colcon build`.
 
 ---
 
 ## 🔧 Prerequisites
 
 Ensure you have:
-- ROS 2 Jazzy installed and sourced
+- ROS 2 Humble or Jazzy installed and sourced
 - A working colcon workspace, e.g. `~/ros2_ws`
 
 ---
@@ -85,9 +87,14 @@ source ~/.bashrc
 
 ```bash
 cd ~/ros2_ws/src
+# Use the branch matching your ROS 2 distro:
+#   ROS 2 Humble → -b humble
+#   ROS 2 Jazzy  → -b jazzy
 git clone https://github.com/moveit/moveit_task_constructor.git -b jazzy
 cd moveit_task_constructor
+# Jazzy pinned commit (tested):
 git reset --hard 9ced9fc10a15388224f0741e5a930a33f4ed6255
+# For Humble, use the humble branch HEAD or a known-good commit.
 ```
 
 ### 2. Install Dependencies
@@ -116,7 +123,17 @@ source ~/.bashrc
 
 ## 🔧 Fix Known Issues
 
-### ♻️ Fix 1: Planning Scene Diff
+> **Compatibility Summary:**
+> | Fix | Humble | Jazzy |
+> |-----|--------|-------|
+> | Fix 1: Planning Scene Diff | Required | Required |
+> | Fix 2: Cartesian Path Jump Threshold | Required | Required |
+> | Fix 3: PipelinePlanner API | Required | Not needed (Jazzy MTC accepts map) |
+> | Fix 4: create_service QoS API | Required | Not needed (Jazzy rclcpp accepts QoS) |
+>
+> All fixes are already applied in this repo's source — no manual changes needed.
+
+### ♻️ Fix 1: Planning Scene Diff *(Humble & Jazzy)*
 
 **File:** `core/src/storage.cpp`
 
@@ -135,7 +152,7 @@ this->end()->scene()->getPlanningSceneDiffMsg(t.scene_diff);
 
 ---
 
-### 📏 Fix 2: Cartesian Path Jump Threshold
+### 📏 Fix 2: Cartesian Path Jump Threshold *(Humble & Jazzy)*
 
 **File:** `core/src/solvers/cartesian_path.cpp`
 
@@ -163,11 +180,64 @@ source install/setup.bash
 
 ---
 
+### Fix 3: PipelinePlanner API *(Humble only — Jazzy MTC accepts map constructor)*
+
+The bundled MTC source uses the older `PipelinePlanner` constructor (takes a pipeline name string, not a map). On Jazzy, the newer map-based API works fine.
+
+**File:** `ur_mtc_pick_place_demo/src/mtc_node.cpp`
+
+Replace:
+```cpp
+std::unordered_map<std::string, std::string> ompl_map_arm = {
+  {"ompl", arm_group_name + "[RRTConnectkConfigDefault]"}
+};
+auto ompl_planner_arm = std::make_shared<mtc::solvers::PipelinePlanner>(
+  this->shared_from_this(),
+  ompl_map_arm);
+```
+
+With:
+```cpp
+auto ompl_planner_arm = std::make_shared<mtc::solvers::PipelinePlanner>(
+  this->shared_from_this(),
+  "ompl");
+```
+
+---
+
+### Fix 4: create_service QoS API *(Humble only — Jazzy rclcpp accepts rclcpp::QoS directly)*
+
+In Humble, `create_service` does not accept `rclcpp::QoS` directly — use `.get_rmw_qos_profile()`. On Jazzy this is not needed.
+
+**File:** `ur_mtc_pick_place_demo/src/get_planning_scene_server.cpp`
+
+Replace:
+```cpp
+service = this->create_service<ur_interfaces::srv::GetPlanningScene>(
+  "get_planning_scene_ur",
+  std::bind(...),
+  qos
+);
+```
+
+With:
+```cpp
+service = this->create_service<ur_interfaces::srv::GetPlanningScene>(
+  "get_planning_scene_ur",
+  std::bind(...),
+  qos.get_rmw_qos_profile()
+);
+```
+
+> **Note:** These fixes are already applied in this repo — no manual changes needed.
+
+---
+
 ## 🎉 Success!
 
 You have now successfully installed and patched:
 - MongoDB and `warehouse_ros_mongo`
 - MoveIt Task Constructor (MTC)
 
-You're ready to use MTC for pick-and-place and complex motion planning tasks in ROS 2 Jazzy!
+You're ready to use MTC for pick-and-place and complex motion planning tasks in ROS 2 Humble or Jazzy!
 

@@ -29,6 +29,7 @@ def generate_launch_description():
     rviz_config_file = LaunchConfiguration('rviz_config_file')
     rviz_config_package = LaunchConfiguration('rviz_config_package')
     robot_name = LaunchConfiguration('robot_name')
+    gripper = LaunchConfiguration('gripper')
 
     # Package names
     package_name_moveit_config = 'moveit_config'
@@ -50,9 +51,20 @@ def generate_launch_description():
         default_value='true',
         description='Whether to start RViz')
 
+    declare_use_move_group_cmd = DeclareLaunchArgument(
+        name='use_move_group',
+        default_value='true',
+        description='Whether to start the move_group node (set false for RViz-only)')
+
+    declare_gripper_cmd = DeclareLaunchArgument(
+        name='gripper',
+        default_value='robotiq_2f_85',
+        description='Gripper to attach to the robot',
+        choices=['robotiq_2f_85', 'robotiq_2f_140', 'onrobot_rg2', 'onrobot_rg6'])
+
     declare_rviz_config_file_cmd = DeclareLaunchArgument(
         name='rviz_config_file',
-        default_value='move_group.rviz',
+        default_value='moveit.rviz',
         description='RViz configuration file')
 
     declare_rviz_config_package_cmd = DeclareLaunchArgument(
@@ -63,29 +75,37 @@ def generate_launch_description():
     def configure_setup(context):
         # Convert robot name from LaunchConfiguration to string
         robot_name_str = robot_name.perform(context)
+        gripper_str = gripper.perform(context)
 
         # Locate package shares
         moveit_config_share = FindPackageShare(package=package_name_moveit_config).find(package_name_moveit_config)
 
         # File paths from MoveIt config package
         urdf_path_xacro = os.path.join(moveit_config_share, "config", "ur.urdf.xacro")
-        srdf_file_path = os.path.join(moveit_config_share, "config", f"{robot_name_str}.srdf")
+        srdf_file_path = os.path.join(moveit_config_share, "config", "ur.srdf.xacro")
         joint_limits_file_path = os.path.join(moveit_config_share, "config", "joint_limits.yaml")
         kinematics_file_path = os.path.join(moveit_config_share, "config", "kinematics.yaml")
         pilz_cartesian_limits_file_path = os.path.join(moveit_config_share, "config", "pilz_cartesian_limits.yaml")
-        moveit_controllers_file_path = os.path.join(moveit_config_share, "config", "moveit_controllers.yaml")
-        initial_positions_file_path = os.path.join(moveit_config_share, "config", "start_positions.yaml")
+        if gripper_str in ("onrobot_rg2", "onrobot_rg6"):
+            moveit_controllers_file_path = os.path.join(
+                moveit_config_share, "config", "moveit_controllers_onrobot.yaml"
+            )
+        else:
+            moveit_controllers_file_path = os.path.join(
+                moveit_config_share, "config", "moveit_controllers.yaml"
+            )
+        initial_positions_file_path = os.path.join(moveit_config_share, "config", "initial_positions.yaml")
 
         # Create MoveIt configuration
         moveit_config = (
             MoveItConfigsBuilder(robot_name_str, package_name=package_name_moveit_config)
             .trajectory_execution(file_path=moveit_controllers_file_path)
-            .robot_description_semantic(file_path=srdf_file_path)
-            .robot_description(file_path=urdf_path_xacro)
+            .robot_description_semantic(file_path=srdf_file_path, mappings={'gripper': gripper})
+            .robot_description(file_path=urdf_path_xacro, mappings={'gripper': gripper})
             .joint_limits(file_path=joint_limits_file_path)
             .robot_description_kinematics(file_path=kinematics_file_path)
             .planning_pipelines(
-                pipelines=["ompl", "pilz_industrial_motion_planner", "stomp"],
+                pipelines=["ompl", "pilz_industrial_motion_planner"],
                 default_planning_pipeline="ompl"
             )
             .planning_scene_monitor(
@@ -102,6 +122,7 @@ def generate_launch_description():
 
         # Create move_group node
         start_move_group_node_cmd = Node(
+            condition=IfCondition(LaunchConfiguration('use_move_group')),
             package="moveit_ros_move_group",
             executable="move_group",
             output="screen",
@@ -151,6 +172,8 @@ def generate_launch_description():
     ld.add_action(declare_robot_name_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_rviz_cmd)
+    ld.add_action(declare_use_move_group_cmd)
+    ld.add_action(declare_gripper_cmd)
     ld.add_action(declare_rviz_config_file_cmd)
     ld.add_action(declare_rviz_config_package_cmd)
 

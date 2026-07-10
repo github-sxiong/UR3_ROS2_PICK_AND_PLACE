@@ -293,12 +293,13 @@ void MTCTaskNode::setupPlanningScene()
   support_surface_id_ = response.support_surface_id;
   service_success_ = response.success;
 
-  // Add all collision objects to the planning scene
-  RCLCPP_INFO(this->get_logger(), "Applying collision objects from service response...");
-  if (!psi.applyCollisionObjects(scene_world_.collision_objects)) {
-    RCLCPP_ERROR(this->get_logger(), "Failed to add collision objects from service response");
-  } else {
-      RCLCPP_INFO(this->get_logger(), "Successfully added %zu collision objects from service response to the planning scene",
+  // Add all collision objects to the planning scene (non-blocking topic publish to avoid DDS response timeout)
+  RCLCPP_INFO(this->get_logger(), "Adding %zu collision objects from service response to the planning scene...",
+    scene_world_.collision_objects.size());
+  if (!scene_world_.collision_objects.empty()) {
+    psi.addCollisionObjects(scene_world_.collision_objects);
+    rclcpp::sleep_for(std::chrono::milliseconds(3000));
+    RCLCPP_INFO(this->get_logger(), "Successfully added %zu collision objects to the planning scene",
       scene_world_.collision_objects.size());
   }
 
@@ -309,6 +310,40 @@ void MTCTaskNode::setupPlanningScene()
       updateObjectParameters(collision_object);
       break;
     }
+  }
+
+  // If the service returned no objects, add the hardcoded target from params so MTC has something to pick
+  if (scene_world_.collision_objects.empty()) {
+    RCLCPP_WARN(this->get_logger(),
+      "Planning scene service returned no objects. Adding fallback '%s' from params.", object_name.c_str());
+
+    moveit_msgs::msg::CollisionObject fallback;
+    fallback.id = object_name;
+    fallback.header.frame_id = object_reference_frame;
+    fallback.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+    shape_msgs::msg::SolidPrimitive prim;
+    if (object_type == "cylinder") {
+      prim.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+      prim.dimensions.resize(2);
+      prim.dimensions[shape_msgs::msg::SolidPrimitive::CYLINDER_HEIGHT] = object_dimensions[0];
+      prim.dimensions[shape_msgs::msg::SolidPrimitive::CYLINDER_RADIUS] = object_dimensions[1];
+    } else {
+      prim.type = shape_msgs::msg::SolidPrimitive::BOX;
+      prim.dimensions.resize(3);
+      prim.dimensions[0] = object_dimensions[0];
+      prim.dimensions[1] = (object_dimensions.size() > 1) ? object_dimensions[1] : object_dimensions[0];
+      prim.dimensions[2] = (object_dimensions.size() > 2) ? object_dimensions[2] : object_dimensions[0];
+    }
+
+    fallback.primitives.push_back(prim);
+    fallback.primitive_poses.push_back(vectorToPose(object_pose_param));
+
+    psi.addCollisionObjects({fallback});
+    rclcpp::sleep_for(std::chrono::milliseconds(3000));
+    RCLCPP_INFO(this->get_logger(), "Fallback object '%s' added at (%.3f, %.3f, %.3f)",
+      object_name.c_str(), object_pose_param[0], object_pose_param[1], object_pose_param[2]);
+    target_object_id_ = object_name;
   }
 
   RCLCPP_INFO(this->get_logger(), "Planning scene setup completed");
@@ -465,12 +500,9 @@ mtc::Task MTCTaskNode::createTask()
   // Create planners for different types of motion
   // Pipeline planner for complex movements
   // OMPL planner
-  std::unordered_map<std::string, std::string> ompl_map_arm = {
-    {"ompl", arm_group_name + "[RRTConnectkConfigDefault]"}
-  };
   auto ompl_planner_arm = std::make_shared<mtc::solvers::PipelinePlanner>(
     this->shared_from_this(),
-    ompl_map_arm);
+    "ompl");
   RCLCPP_INFO(this->get_logger(), "OMPL planner created for the arm group");
 
   // JointInterpolation is a basic planner that is used for simple motions
@@ -486,8 +518,6 @@ mtc::Task MTCTaskNode::createTask()
   RCLCPP_INFO(this->get_logger(), "Cartesian planner created");
 
   // Set task properties
-  task.setProperty("trajectory_execution_info",
-    mtc::TrajectoryExecutionInfo().set__controller_names(controller_names));
   task.setProperty("group", arm_group_name); // The main planning group
   task.setProperty("eef", gripper_group_name); // The end-effector group
   task.setProperty("ik_frame", gripper_frame); // The frame for inverse kinematics
@@ -517,7 +547,7 @@ mtc::Task MTCTaskNode::createTask()
   stage_open_gripper->setGroup(gripper_group_name);
   stage_open_gripper->setGoal(gripper_open_pose);
   stage_open_gripper->properties().set("trajectory_execution_info",
-                      mtc::TrajectoryExecutionInfo().set__controller_names(controller_names));
+                      mtc::TrajectoryExecutionInfo().set__controller_names({"gripper_controller"}));
   task.add(std::move(stage_open_gripper));
 
   /****************************************************
@@ -635,7 +665,7 @@ mtc::Task MTCTaskNode::createTask()
       stage->setGroup(gripper_group_name);
       stage->setGoal(gripper_close_pose);
       stage->properties().set("trajectory_execution_info",
-                      mtc::TrajectoryExecutionInfo().set__controller_names(controller_names));
+                      mtc::TrajectoryExecutionInfo().set__controller_names({"gripper_controller"}));
       grasp->insert(std::move(stage));
     }
 
@@ -782,7 +812,7 @@ mtc::Task MTCTaskNode::createTask()
       stage->setGroup(gripper_group_name);
       stage->setGoal(gripper_open_pose);
       stage->properties().set("trajectory_execution_info",
-        mtc::TrajectoryExecutionInfo().set__controller_names(controller_names));
+        mtc::TrajectoryExecutionInfo().set__controller_names({"gripper_controller"}));
       place->insert(std::move(stage));
     }
 
@@ -828,19 +858,6 @@ mtc::Task MTCTaskNode::createTask()
     task.add(std::move(place));
   }
 
-  /******************************************************
-   *                                                    *
-   *          Move to Home                              *
-   *                                                    *
-   *****************************************************/
-  {
-    auto stage = std::make_unique<mtc::stages::MoveTo>("move home", ompl_planner_arm);
-    stage->properties().set("trajectory_execution_info",
-                      mtc::TrajectoryExecutionInfo().set__controller_names(controller_names));
-    stage->properties().configureInitFrom(mtc::Stage::PARENT, { "group" });
-    stage->setGoal(arm_home_pose);
-    task.add(std::move(stage));
-  }
   return task;
 }
 
